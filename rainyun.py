@@ -3,6 +3,8 @@ import os
 import random
 import re
 import time
+import subprocess
+import sys
 
 import cv2
 import ddddocr
@@ -41,8 +43,17 @@ except ImportError:
     print("webdriver_manager未安装，将使用备用方式")
     ChromeDriverManager = None
     ChromeType = None
-import subprocess
-import sys
+
+# --- START OF MODIFICATION: 添加通知函数导入 ---
+try:
+    from notify import send
+    print("已加载通知模块 (notify.py)")
+except ImportError:
+    print("警告: 未找到 notify.py，将无法发送通知。")
+    def send(*args, **kwargs):
+        pass
+# --- END OF MODIFICATION ---
+
 
 def init_selenium(debug=False, headless=False):
     ops = webdriver.ChromeOptions()
@@ -420,7 +431,14 @@ if __name__ == "__main__":
     
     # 确保有用户名和密码
     if not user or not pwd:
-        print("错误: 未设置用户名或密码，请在环境变量中设置RAINYUN_USER和RAINYUN_PASS")
+        err_msg = "错误: 未设置用户名或密码，请在环境变量中设置RAINYUN_USER和RAINYUN_PASS"
+        print(err_msg)
+        # --- START OF MODIFICATION: 添加配置错误通知 ---
+        try:
+            send("雨云签到配置错误", err_msg)
+        except Exception as e:
+            print(f"发送通知失败: {e}")
+        # --- END OF MODIFICATION ---
         exit(1)
     
     # 环境变量判断是否在GitHub Actions中运行
@@ -444,150 +462,191 @@ if __name__ == "__main__":
     logger.info("Github发布页: https://github.com/scfcn/Rainyun-Qiandao")
     logger.info("------------------------------------------------------------------")
     
-    if not debug:
-        delay_sec = random.randint(5, 10)
-        logger.info(f"随机延时等待 {delay_sec} 秒")
-        time.sleep(delay_sec)
-    logger.info("初始化 ddddocr")
-    ocr = ddddocr.DdddOcr(ocr=True, show_ad=False)
-    det = ddddocr.DdddOcr(det=True, show_ad=False)
-    logger.info("初始化 Selenium")
-    # 在 main 函数中添加
-    headless = os.environ.get('HEADLESS', 'false').lower() == 'true'
-    debug = os.environ.get('DEBUG', 'false').lower() == 'true'
+    driver = None # 【新增】初始化 driver 变量
     
-    # 传递 headless 参数给 init_selenium
-    driver = init_selenium(debug=debug, headless=headless)
-    # 过 Selenium 检测
-    with open("stealth.min.js", mode="r") as f:
-        js = f.read()
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": js
-    })
-    logger.info("发起登录请求")
-    driver.get("https://app.rainyun.com/auth/login")
-    wait = WebDriverWait(driver, timeout)
-    # 改进的登录逻辑，添加重试机制
-    max_retries = 3
-    retry_count = 0
-    login_success = False
-    
-    while retry_count < max_retries and not login_success:
-        try:
-            # 使用更可靠的定位方式
-            username = wait.until(EC.visibility_of_element_located((By.NAME, 'login-field')))
-            password = wait.until(EC.visibility_of_element_located((By.NAME, 'login-password')))
-            
-            # 尝试多种方式定位登录按钮
-            try:
-                login_button = wait.until(EC.element_to_be_clickable((By.XPATH,
-                                                                    '//*[@id="app"]/div[1]/div[1]/div/div[2]/fade/div/div/span/form/button')))
-            except:
-                try:
-                    login_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"]')))
-                except:
-                    login_button = wait.until(EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "登录")]')))
-            
-            # 清除可能存在的输入
-            username.clear()
-            password.clear()
-            
-            # 添加输入延迟，模拟真实用户
-            username.send_keys(user)
-            time.sleep(0.5)
-            password.send_keys(pwd)
-            time.sleep(0.5)
-            
-            # 使用JavaScript点击，避免元素遮挡问题
-            driver.execute_script("arguments[0].click();", login_button)
-            logger.info(f"登录尝试 {retry_count + 1}/{max_retries}")
-            login_success = True
-        except TimeoutException:
-            retry_count += 1
-            if retry_count < max_retries:
-                logger.warning(f"登录失败，{retry_count}秒后重试...")
-                time.sleep(retry_count)
-                driver.refresh()
-            else:
-                logger.error("页面加载超时，请尝试延长超时时间或切换到国内网络环境！")
-                exit()
-    try:
-        login_captcha = wait.until(EC.visibility_of_element_located((By.ID, 'tcaptcha_iframe_dy')))
-        logger.warning("触发验证码！")
-        driver.switch_to.frame("tcaptcha_iframe_dy")
-        process_captcha()
-    except TimeoutException:
-        logger.info("未触发验证码")
-    time.sleep(5)
-    driver.switch_to.default_content()
-    # 验证登录状态并处理赚取积分
-    if "dashboard" in driver.current_url:
-        logger.info("登录成功！")
-        logger.info("正在转到赚取积分页")
+    try: # 【新增】开始 try 块，包裹主逻辑
+        if not debug:
+            delay_sec = random.randint(5, 10)
+            logger.info(f"随机延时等待 {delay_sec} 秒")
+            time.sleep(delay_sec)
+        logger.info("初始化 ddddocr")
+        ocr = ddddocr.DdddOcr(ocr=True, show_ad=False)
+        det = ddddocr.DdddOcr(det=True, show_ad=False)
+        logger.info("初始化 Selenium")
+        # 在 main 函数中添加
+        headless = os.environ.get('HEADLESS', 'false').lower() == 'true'
+        debug = os.environ.get('DEBUG', 'false').lower() == 'true'
         
-        # 尝试多次访问赚取积分页面
-        for _ in range(3):
+        # 传递 headless 参数给 init_selenium
+        driver = init_selenium(debug=debug, headless=headless)
+        # 过 Selenium 检测
+        with open("stealth.min.js", mode="r") as f:
+            js = f.read()
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": js
+        })
+        logger.info("发起登录请求")
+        driver.get("https://app.rainyun.com/auth/login")
+        wait = WebDriverWait(driver, timeout)
+        # 改进的登录逻辑，添加重试机制
+        max_retries = 3
+        retry_count = 0
+        login_success = False
+        
+        while retry_count < max_retries and not login_success:
             try:
-                driver.get("https://app.rainyun.com/account/reward/earn")
-                logger.info("等待赚取积分页面加载...")
-                # 等待页面加载完成
-                wait.until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-                time.sleep(3)  # 额外等待确保页面完全渲染
+                # 使用更可靠的定位方式
+                username = wait.until(EC.visibility_of_element_located((By.NAME, 'login-field')))
+                password = wait.until(EC.visibility_of_element_located((By.NAME, 'login-password')))
                 
-                # 使用多种策略查找赚取积分按钮
-                earn = None
-                strategies = [
-                    (By.XPATH, '//*[@id="app"]/div[1]/div[3]/div[2]/div/div/div[2]/div[2]/div/div/div/div[1]/div/div[1]/div/div[1]/div/span[2]/a'),
-                    (By.XPATH, '//a[contains(@href, "earn") and contains(text(), "赚取")]'),
-                    (By.CSS_SELECTOR, 'a[href*="earn"]'),
-                    (By.XPATH, '//a[contains(@class, "earn")]')
-                ]
-                
-                for by, selector in strategies:
+                # 尝试多种方式定位登录按钮
+                try:
+                    login_button = wait.until(EC.element_to_be_clickable((By.XPATH,
+                                                                        '//*[@id="app"]/div[1]/div[1]/div/div[2]/fade/div/div/span/form/button')))
+                except:
                     try:
-                        earn = wait.until(EC.element_to_be_clickable((by, selector)))
-                        logger.info(f"使用策略 {by}={selector} 找到赚取积分按钮")
-                        break
+                        login_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"]')))
                     except:
-                        logger.debug(f"策略 {by}={selector} 未找到按钮，尝试下一种")
-                        continue
+                        login_button = wait.until(EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "登录")]')))
                 
-                if earn:
-                    # 滚动到元素位置
-                    driver.execute_script("arguments[0].scrollIntoView(true);", earn)
-                    time.sleep(1)
-                    # 使用JavaScript点击
-                    logger.info("点击赚取积分")
-                    driver.execute_script("arguments[0].click();", earn)
-                    
-                    # 处理可能出现的验证码
-                    try:
-                        logger.info("检查是否需要验证码")
-                        wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "tcaptcha_iframe_dy")))
-                        logger.info("处理验证码")
-                        process_captcha()
-                        driver.switch_to.default_content()
-                    except:
-                        logger.info("未触发验证码或验证码框架加载失败")
-                        driver.switch_to.default_content()
-                    
-                    logger.info("赚取积分操作完成")
-                    break
-                else:
-                    logger.warning("未找到赚取积分按钮，刷新页面重试...")
+                # 清除可能存在的输入
+                username.clear()
+                password.clear()
+                
+                # 添加输入延迟，模拟真实用户
+                username.send_keys(user)
+                time.sleep(0.5)
+                password.send_keys(pwd)
+                time.sleep(0.5)
+                
+                # 使用JavaScript点击，避免元素遮挡问题
+                driver.execute_script("arguments[0].click();", login_button)
+                logger.info(f"登录尝试 {retry_count + 1}/{max_retries}")
+                login_success = True
+            except TimeoutException:
+                retry_count += 1
+                if retry_count < max_retries:
+                    logger.warning(f"登录失败，{retry_count}秒后重试...")
+                    time.sleep(retry_count)
                     driver.refresh()
+                else:
+                    logger.error("页面加载超时，请尝试延长超时时间或切换到国内网络环境！")
+                    # 这里退出前不发送通知，留给下面的 else 块处理
+                    raise Exception("登录页面加载超时或失败。") # 抛出异常到外层 try/except
+        try:
+            login_captcha = wait.until(EC.visibility_of_element_located((By.ID, 'tcaptcha_iframe_dy')))
+            logger.warning("触发验证码！")
+            driver.switch_to.frame("tcaptcha_iframe_dy")
+            process_captcha()
+        except TimeoutException:
+            logger.info("未触发验证码")
+        time.sleep(5)
+        driver.switch_to.default_content()
+        # 验证登录状态并处理赚取积分
+        if "dashboard" in driver.current_url:
+            logger.info("登录成功！")
+            logger.info("正在转到赚取积分页")
+            
+            # 尝试多次访问赚取积分页面
+            for _ in range(3):
+                try:
+                    driver.get("https://app.rainyun.com/account/reward/earn")
+                    logger.info("等待赚取积分页面加载...")
+                    # 等待页面加载完成
+                    wait.until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+                    time.sleep(3)  # 额外等待确保页面完全渲染
+                    
+                    # 使用多种策略查找赚取积分按钮
+                    earn = None
+                    strategies = [
+                        (By.XPATH, '//*[@id="app"]/div[1]/div[3]/div[2]/div/div/div[2]/div[2]/div/div/div/div[1]/div/div[1]/div/div[1]/div/span[2]/a'),
+                        (By.XPATH, '//a[contains(@href, "earn") and contains(text(), "赚取")]'),
+                        (By.CSS_SELECTOR, 'a[href*="earn"]'),
+                        (By.XPATH, '//a[contains(@class, "earn")]')
+                    ]
+                    
+                    for by, selector in strategies:
+                        try:
+                            earn = wait.until(EC.element_to_be_clickable((by, selector)))
+                            logger.info(f"使用策略 {by}={selector} 找到赚取积分按钮")
+                            break
+                        except:
+                            logger.debug(f"策略 {by}={selector} 未找到按钮，尝试下一种")
+                            continue
+                    
+                    if earn:
+                        # 滚动到元素位置
+                        driver.execute_script("arguments[0].scrollIntoView(true);", earn)
+                        time.sleep(1)
+                        # 使用JavaScript点击
+                        logger.info("点击赚取积分")
+                        driver.execute_script("arguments[0].click();", earn)
+                        
+                        # 处理可能出现的验证码
+                        try:
+                            logger.info("检查是否需要验证码")
+                            wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "tcaptcha_iframe_dy")))
+                            logger.info("处理验证码")
+                            process_captcha()
+                            driver.switch_to.default_content()
+                        except:
+                            logger.info("未触发验证码或验证码框架加载失败")
+                            driver.switch_to.default_content()
+                        
+                        logger.info("赚取积分操作完成")
+                        break
+                    else:
+                        logger.warning("未找到赚取积分按钮，刷新页面重试...")
+                        driver.refresh()
+                        time.sleep(3)
+                except Exception as e:
+                    logger.error(f"访问赚取积分页面时出错: {e}")
                     time.sleep(3)
+            else:
+                logger.error("多次尝试后仍无法找到赚取积分按钮")
+            driver.implicitly_wait(5)
+            points_raw = driver.find_element(By.XPATH,
+                                             '//*[@id="app"]/div[1]/div[3]/div[2]/div/div/div[2]/div[1]/div[1]/div/p/div/h3').get_attribute(
+                "textContent")
+            current_points = int(''.join(re.findall(r'\d+', points_raw)))
+            logger.info(f"当前剩余积分: {current_points} | 约为 {current_points / 2000:.2f} 元")
+            logger.info("任务执行成功！")
+            
+            # --- START OF MODIFICATION: 添加成功通知逻辑 ---
+            notification_title = "✅ 雨云自动签到成功"
+            notification_content = f"登录用户: {user}\n当前剩余积分: {current_points} | 约为 {current_points / 2000:.2f} 元"
+            try:
+                send(notification_title, notification_content)
             except Exception as e:
-                logger.error(f"访问赚取积分页面时出错: {e}")
-                time.sleep(3)
+                logger.error(f"发送通知失败: {e}")
+            # --- END OF MODIFICATION ---
+
         else:
-            logger.error("多次尝试后仍无法找到赚取积分按钮")
-        driver.implicitly_wait(5)
-        points_raw = driver.find_element(By.XPATH,
-                                         '//*[@id="app"]/div[1]/div[3]/div[2]/div/div/div[2]/div[1]/div[1]/div/p/div/h3').get_attribute(
-            "textContent")
-        current_points = int(''.join(re.findall(r'\d+', points_raw)))
-        logger.info(f"当前剩余积分: {current_points} | 约为 {current_points / 2000:.2f} 元")
-        logger.info("任务执行成功！")
-    else:
-        logger.error("登录失败！")
+            logger.error("登录失败！")
+            
+            # --- START OF MODIFICATION: 添加失败通知逻辑 ---
+            notification_title = "❌ 雨云自动签到失败"
+            notification_content = f"登录用户: {user}\n\n登录失败，未能进入仪表盘页面，请检查账号密码或验证码处理逻辑。"
+            try:
+                send(notification_title, notification_content)
+            except Exception as e:
+                logger.error(f"发送通知失败: {e}")
+            # --- END OF MODIFICATION ---
+
+    except Exception as e: # 【新增】捕获未处理的异常
+        err_msg = f"脚本运行期间发生致命异常: {str(e)}"
+        logger.error(err_msg, exc_info=True)
+        # --- START OF MODIFICATION: 添加致命错误通知 ---
+        try:
+            send("雨云脚本运行异常", err_msg)
+        except Exception as e_send:
+            logger.error(f"发送通知失败: {e_send}")
+        # --- END OF MODIFICATION ---
+
+    finally: # 【新增】确保浏览器关闭
+        if driver:
+            logger.info("正在关闭浏览器...")
+            try:
+                driver.quit()
+            except:
+                pass
