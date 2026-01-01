@@ -2,8 +2,6 @@
 ## **1.自动签到**
 转载[Rainyun-Qiandao-V2](https://github.com/scfcn/Rainyun-Qiandao)
 
-在文件夹sign-in中
-
 支持Github Actions
 
 1.fork本仓库
